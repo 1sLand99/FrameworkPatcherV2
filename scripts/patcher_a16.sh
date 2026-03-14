@@ -554,6 +554,66 @@ PY
     return 0
 }
 
+replace_is_international_build_checks() {
+    local file="$1"
+
+    python3 - "$file" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+if not path.exists():
+    sys.exit(4)
+
+lines = path.read_text().splitlines()
+pattern = re.compile(r'^(\s*)sget-boolean\s+([vp]\d+),\s+Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z(\s*.*)$')
+matched = False
+changed = False
+
+for idx, line in enumerate(lines):
+    match = pattern.match(line)
+    if not match:
+        continue
+    matched = True
+    indent, reg, suffix = match.groups()
+    try:
+        reg_index = int(reg[1:])
+    except ValueError:
+        reg_index = 0
+    opcode = 'const/4' if reg_index <= 15 else 'const/16'
+    replacement = f"{indent}{opcode} {reg}, 0x1{suffix}"
+    if lines[idx] != replacement:
+        lines[idx] = replacement
+        changed = True
+
+if not matched:
+    sys.exit(3)
+
+if changed:
+    path.write_text("\n".join(lines) + "\n")
+PY
+
+    local status=$?
+    case "$status" in
+        0)
+            log "Replaced IS_INTERNATIONAL_BUILD gates in $(basename "$file")"
+            ;;
+        3)
+            warn "IS_INTERNATIONAL_BUILD not found in $(basename "$file")"
+            ;;
+        4)
+            warn "File not found: $file"
+            ;;
+        *)
+            err "Failed to replace IS_INTERNATIONAL_BUILD in $file (status $status)"
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
 # ----------------------------------------------
 # Framework patches (Android 16)
 # ----------------------------------------------
@@ -963,47 +1023,87 @@ apply_miui_services_cn_notification_fix() {
 
     log "Applying CN notification fix to miui-services.jar (Android 16)..."
 
-    # Patch BroadcastQueueModernStubImpl
     local file
+
+    # Broadcast queue gates (two occurrences, v0)
     file=$(find "$decompile_dir" -type f -path "*/com/android/server/am/BroadcastQueueModernStubImpl.smali" | head -n 1)
     if [ -f "$file" ]; then
         log "Patching BroadcastQueueModernStubImpl.smali..."
-        sed -i 's/sget-boolean v2, Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 v2, 0x1/g' "$file"
-        log "✓ Patched BroadcastQueueModernStubImpl (v2)"
+        replace_is_international_build_checks "$file"
     else
         warn "BroadcastQueueModernStubImpl.smali not found"
     fi
 
-    # Patch ActivityManagerServiceImpl (has two occurrences: v1 and v4)
+    # ActivityManagerService gates (p2 + v0)
     file=$(find "$decompile_dir" -type f -path "*/com/android/server/am/ActivityManagerServiceImpl.smali" | head -n 1)
     if [ -f "$file" ]; then
         log "Patching ActivityManagerServiceImpl.smali..."
-        sed -i 's/sget-boolean v1, Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 v1, 0x1/g' "$file"
-        sed -i 's/sget-boolean v4, Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 v4, 0x1/g' "$file"
-        log "✓ Patched ActivityManagerServiceImpl (v1, v4)"
+        replace_is_international_build_checks "$file"
     else
         warn "ActivityManagerServiceImpl.smali not found"
     fi
 
-    # Patch ProcessManagerService
-    file=$(find "$decompile_dir" -type f -path "*/com/android/server/am/ProcessManagerService.smali" | head -n 1)
-    if [ -f "$file" ]; then
-        log "Patching ProcessManagerService.smali..."
-        sed -i 's/sget-boolean v0, Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 v0, 0x1/g' "$file"
-        log "✓ Patched ProcessManagerService (v0)"
-    else
-        warn "ProcessManagerService.smali not found"
-    fi
-
-    # Patch ProcessSceneCleaner
-    # Note: Guide shows find v4 but replace with v0 - implementing as specified
+    # Process cleanup gate
     file=$(find "$decompile_dir" -type f -path "*/com/android/server/am/ProcessSceneCleaner.smali" | head -n 1)
     if [ -f "$file" ]; then
         log "Patching ProcessSceneCleaner.smali..."
-        sed -i 's/sget-boolean v4, Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 v0, 0x1/g' "$file"
-        log "✓ Patched ProcessSceneCleaner (v4 → v0)"
+        replace_is_international_build_checks "$file"
     else
         warn "ProcessSceneCleaner.smali not found"
+    fi
+
+    # Job and alarm gating
+    file=$(find "$decompile_dir" -type f -path "*/com/android/server/job/JobServiceContextImpl.smali" | head -n 1)
+    if [ -f "$file" ]; then
+        log "Patching JobServiceContextImpl.smali..."
+        replace_is_international_build_checks "$file"
+    else
+        warn "JobServiceContextImpl.smali not found"
+    fi
+
+    file=$(find "$decompile_dir" -type f -path "*/com/android/server/alarm/AlarmManagerServiceStubImpl.smali" | head -n 1)
+    if [ -f "$file" ]; then
+        log "Patching AlarmManagerServiceStubImpl.smali..."
+        replace_is_international_build_checks "$file"
+    else
+        warn "AlarmManagerServiceStubImpl.smali not found"
+    fi
+
+    # Notification full-screen gate
+    file=$(find "$decompile_dir" -type f -path "*/com/android/server/notification/NotificationManagerServiceImpl.smali" | head -n 1)
+    if [ -f "$file" ]; then
+        log "Patching NotificationManagerServiceImpl.smali..."
+        replace_is_international_build_checks "$file"
+    else
+        warn "NotificationManagerServiceImpl.smali not found"
+    fi
+
+    # AppOps gates (v0 + v1 occurrences)
+    file=$(find "$decompile_dir" -type f -path "*/com/android/server/AppOpsServiceStubImpl.smali" | head -n 1)
+    if [ -f "$file" ]; then
+        log "Patching AppOpsServiceStubImpl.smali..."
+        replace_is_international_build_checks "$file"
+    else
+        warn "AppOpsServiceStubImpl.smali not found"
+    fi
+
+    # ActivitySecurityHelper gate
+    file=$(find "$decompile_dir" -type f -path "*/miui/app/ActivitySecurityHelper.smali" | head -n 1)
+    if [ -f "$file" ]; then
+        log "Patching ActivitySecurityHelper.smali..."
+        replace_is_international_build_checks "$file"
+    else
+        warn "ActivitySecurityHelper.smali not found"
+    fi
+
+    # HyperOS 2.0 Greeze CN_MODEL (high impact)
+    file=$(find "$decompile_dir" -type f -path "*/com/miui/server/greeze/PolicyManager.smali" | head -n 1)
+    if [ -f "$file" ]; then
+        log "Patching PolicyManager.smali (CN_MODEL)..."
+        insert_line_before_all "$file" "sput-boolean v0, Lcom/miui/server/greeze/PolicyManager;->CN_MODEL:Z" "const/4 v0, 0x0"
+        log "✓ Patched PolicyManager (CN_MODEL = false)"
+    else
+        warn "PolicyManager.smali not found"
     fi
 
     log "CN notification fix applied to miui-services.jar (Android 16)"
